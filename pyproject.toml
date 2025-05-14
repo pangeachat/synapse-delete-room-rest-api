@@ -36,11 +36,8 @@ dev = [
 requires = [
   "setuptools",
   "wheel",
-  "setuptools_scm",
 ]
 build-backend = "setuptools.build_meta"
-
-[tool.setuptools_scm]
 
 [tool.mypy]
 files = ["synapse_delete_room_rest_api", "tests"]
