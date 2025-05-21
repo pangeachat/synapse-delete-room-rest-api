@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 from synapse_delete_room_rest_api.extract_body_json import extract_body_json
+from synapse_delete_room_rest_api.get_room_members import get_room_members
 from synapse_delete_room_rest_api.is_rate_limited import is_rate_limited
 from synapse_delete_room_rest_api.user_has_highest_power_level import (
     user_has_highest_power_level,
 )
-from synapse_delete_room_rest_api.user_is_room_member import user_is_room_member
 
 if TYPE_CHECKING:
     from synapse_delete_room_rest_api import SynapseDeleteRoomRestAPIConfig
@@ -80,9 +79,8 @@ class DeleteRoom(Resource):
                 return
 
             # Ensure requester is member of the room
-            (is_member, room_members_ids) = await user_is_room_member(
-                self._api, requester_id, room_id
-            )
+            room_members_ids = await get_room_members(self._api, room_id)
+            is_member = requester_id in room_members_ids
             if not is_member:
                 respond_with_json(
                     request,
@@ -102,18 +100,16 @@ class DeleteRoom(Resource):
                 )
                 return
 
-            # Kick all members
-            await asyncio.gather(
-                *[
-                    self._api.update_room_membership(
-                        sender=requester_id,
-                        target=member_id,
-                        room_id=room_id,
-                        new_membership="leave",
-                    )
-                    for member_id in room_members_ids
-                ]
-            )
+            # Kick all members except the requester
+            for member_id in room_members_ids:
+                if member_id == requester_id:
+                    continue
+                await self._api.update_room_membership(
+                    sender=requester_id,
+                    target=member_id,
+                    room_id=room_id,
+                    new_membership="leave",
+                )
 
             # Leave the room
             await self._api.update_room_membership(
@@ -122,7 +118,6 @@ class DeleteRoom(Resource):
                 room_id=room_id,
                 new_membership="leave",
             )
-
             respond_with_json(
                 request,
                 200,
@@ -144,7 +139,7 @@ class DeleteRoom(Resource):
             )
 
         except Exception as e:
-            logger.error(f"Error processing request: {e}")
+            logger.error(e)
             respond_with_json(
                 request,
                 500,

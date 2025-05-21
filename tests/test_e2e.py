@@ -270,6 +270,17 @@ class TestE2E(aiounittest.AsyncTestCase):
                     room_id, f"@{u}:my.domain.name", tokens[u]
                 )
                 self.assertTrue(accepted)
+
+            # Verify all users are in the room
+            for u in ["roomadmin", "user2", "user3"]:
+                member_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state/m.room.member/@{u}:my.domain.name"
+                resp = requests.get(
+                    member_url,
+                    headers={"Authorization": f"Bearer {tokens[u]}"},
+                )
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.json().get("membership"), "join")
+
             # Non-room-admin tries to delete (should fail)
             delete_url = "http://localhost:8008/_synapse/client/pangea/v1/delete_room"
             response = requests.post(
@@ -287,6 +298,16 @@ class TestE2E(aiounittest.AsyncTestCase):
             )
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["message"], "Deleted")
+
+            # Assert other users are no longer in the room
+            for u in ["user2", "user3"]:
+                resp = requests.get(
+                    "http://localhost:8008/_matrix/client/v3/joined_rooms",
+                    headers={"Authorization": f"Bearer {tokens[u]}"},
+                )
+                self.assertEqual(resp.status_code, 200)
+                joined_rooms = resp.json().get("joined_rooms", [])
+                self.assertEqual(len(joined_rooms), 0)
         finally:
             if server_process is not None:
                 server_process.terminate()
@@ -348,6 +369,17 @@ class TestE2E(aiounittest.AsyncTestCase):
                     room_id, f"@{u}:my.domain.name", tokens[u]
                 )
                 self.assertTrue(accepted)
+
+            # Verify all users are in the room
+            for u in ["roomadmin", "user2", "user3"]:
+                member_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state/m.room.member/@{u}:my.domain.name"
+                resp = requests.get(
+                    member_url,
+                    headers={"Authorization": f"Bearer {tokens[u]}"},
+                )
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.json().get("membership"), "join")
+
             # Non-room-admin tries to delete (should fail)
             delete_url = "http://localhost:8008/_synapse/client/pangea/v1/delete_room"
             response = requests.post(
@@ -365,6 +397,15 @@ class TestE2E(aiounittest.AsyncTestCase):
             )
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["message"], "Deleted")
+            # Assert other users are no longer in the room
+            for u in ["user2", "user3"]:
+                resp = requests.get(
+                    "http://localhost:8008/_matrix/client/v3/joined_rooms",
+                    headers={"Authorization": f"Bearer {tokens[u]}"},
+                )
+                self.assertEqual(resp.status_code, 200)
+                joined_rooms = resp.json().get("joined_rooms", [])
+                self.assertEqual(len(joined_rooms), 0)
         finally:
             if postgres is not None:
                 postgres.stop()
