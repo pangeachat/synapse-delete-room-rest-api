@@ -255,40 +255,42 @@ class TestE2E(aiounittest.AsyncTestCase):
                 {"user": "user3", "password": "pw3"},
                 {"user": "anotheradmin", "password": "pw4"},
             ]
-            for u in users:
+            for register_user in users:
                 await self.register_user(
                     config_path=config_path,
                     dir=synapse_dir,
-                    user=u["user"],
-                    password=u["password"],
+                    user=register_user["user"],
+                    password=register_user["password"],
                     admin=False,
                 )
             # Login users
             tokens = {}
-            for u in users:
-                tokens[u["user"]] = await self.login_user(u["user"], u["password"])
+            for token_user in users:
+                tokens[token_user["user"]] = await self.login_user(
+                    token_user["user"], token_user["password"]
+                )
             # "roomadmin" creates private room
             admin_token = tokens["roomadmin"]
             room_id = await self.create_private_room(admin_token)
             # "roomadmin" invites others
-            for u in ["user2", "user3"]:
+            for invite_user in ["user2", "user3"]:
                 invited = await self.invite_user_to_room(
-                    room_id, f"@{u}:my.domain.name", admin_token
+                    room_id, f"@{invite_user}:my.domain.name", admin_token
                 )
                 self.assertTrue(invited)
             # Others accept invite
-            for u in ["user2", "user3"]:
+            for invite_user in ["user2", "user3"]:
                 accepted = await self.accept_room_invitation(
-                    room_id, f"@{u}:my.domain.name", tokens[u]
+                    room_id, f"@{invite_user}:my.domain.name", tokens[invite_user]
                 )
                 self.assertTrue(accepted)
 
             # Verify all users are in the room
-            for u in ["roomadmin", "user2", "user3"]:
-                member_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state/m.room.member/@{u}:my.domain.name"
+            for joined_user in ["roomadmin", "user2", "user3"]:
+                member_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state/m.room.member/@{joined_user}:my.domain.name"
                 resp = requests.get(
                     member_url,
-                    headers={"Authorization": f"Bearer {tokens[u]}"},
+                    headers={"Authorization": f"Bearer {tokens[joined_user]}"},
                 )
                 self.assertEqual(resp.status_code, 200)
                 self.assertEqual(resp.json().get("membership"), "join")
@@ -311,10 +313,10 @@ class TestE2E(aiounittest.AsyncTestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["message"], "Deleted")
             # Assert other users are no longer in the room
-            for u in ["user2", "user3"]:
+            for remove_user in ["user2", "user3"]:
                 resp = requests.get(
                     "http://localhost:8008/_matrix/client/v3/joined_rooms",
-                    headers={"Authorization": f"Bearer {tokens[u]}"},
+                    headers={"Authorization": f"Bearer {tokens[remove_user]}"},
                 )
                 self.assertEqual(resp.status_code, 200)
                 joined_rooms = resp.json().get("joined_rooms", [])
@@ -322,37 +324,37 @@ class TestE2E(aiounittest.AsyncTestCase):
 
             # "roomadmin" creates another private room and invite anotheradmin
             room_id = await self.create_private_room(admin_token)
-            for u in ["anotheradmin"]:
+            for admin in ["anotheradmin"]:
                 invited = await self.invite_user_to_room(
-                    room_id, f"@{u}:my.domain.name", admin_token
+                    room_id, f"@{admin}:my.domain.name", admin_token
                 )
                 self.assertTrue(invited)
 
             # "anotheradmin" accept invite
-            for u in ["anotheradmin"]:
+            for invited_admin in ["anotheradmin"]:
                 accepted = await self.accept_room_invitation(
-                    room_id, f"@{u}:my.domain.name", tokens[u]
+                    room_id, f"@{invited_admin}:my.domain.name", tokens[invited_admin]
                 )
                 self.assertTrue(accepted)
 
             # Update anotheradmin to be room admin
-            for u in ["anotheradmin"]:
+            for updated_admin in ["anotheradmin"]:
                 await self.set_member_power_level(
-                    room_id, f"@{u}:my.domain.name", 100, admin_token
+                    room_id, f"@{updated_admin}:my.domain.name", 100, admin_token
                 )
 
             # Verify all users are in the room and is admin
-            for u in ["roomadmin", "anotheradmin"]:
-                member_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state/m.room.member/@{u}:my.domain.name"
+            for admin_member in ["roomadmin", "anotheradmin"]:
+                member_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state/m.room.member/@{admin_member}:my.domain.name"
                 resp = requests.get(
                     member_url,
-                    headers={"Authorization": f"Bearer {tokens[u]}"},
+                    headers={"Authorization": f"Bearer {tokens[admin_member]}"},
                 )
                 self.assertEqual(resp.status_code, 200)
                 self.assertEqual(resp.json().get("membership"), "join")
 
                 power_level = await self.get_member_power_level(
-                    room_id, f"@{u}:my.domain.name", admin_token
+                    room_id, f"@{admin_member}:my.domain.name", admin_token
                 )
                 self.assertEqual(power_level, 100)
 
@@ -365,10 +367,10 @@ class TestE2E(aiounittest.AsyncTestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["message"], "Deleted")
             # Assert other users are no longer in the room
-            for u in ["anotheradmin"]:
+            for ex_admin in ["anotheradmin"]:
                 resp = requests.get(
                     "http://localhost:8008/_matrix/client/v3/joined_rooms",
-                    headers={"Authorization": f"Bearer {tokens[u]}"},
+                    headers={"Authorization": f"Bearer {tokens[ex_admin]}"},
                 )
                 self.assertEqual(resp.status_code, 200)
                 joined_rooms = resp.json().get("joined_rooms", [])
