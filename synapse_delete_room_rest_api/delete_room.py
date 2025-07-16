@@ -39,6 +39,7 @@ class DeleteRoom(Resource):
         self._config = config
         self._auth = self._api._hs.get_auth()
         self._datastores = self._api._hs.get_datastores()
+        self._pagination_handler = self._api._hs.get_pagination_handler()
 
     def render_POST(self, request: SynapseRequest):
         defer.ensureDeferred(self._async_render_POST(request))
@@ -98,26 +99,12 @@ class DeleteRoom(Resource):
                     {"error": "Bad request. Not the highest power level"},
                     send_cors=True,
                 )
+
                 return
 
-            # Kick all members except the requester
-            for member_id in room_members_ids:
-                if member_id == requester_id:
-                    continue
-                await self._api.update_room_membership(
-                    sender=requester_id,
-                    target=member_id,
-                    room_id=room_id,
-                    new_membership="leave",
-                )
+            # Purge room
+            await self._pagination_handler.purge_room(room_id, force=True)
 
-            # Leave the room
-            await self._api.update_room_membership(
-                sender=requester_id,
-                target=requester_id,
-                room_id=room_id,
-                new_membership="leave",
-            )
             respond_with_json(
                 request,
                 200,

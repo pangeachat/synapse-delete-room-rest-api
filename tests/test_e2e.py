@@ -225,122 +225,35 @@ class TestE2E(aiounittest.AsyncTestCase):
         return response.json()["room_id"]
 
     async def test_delete_room_sqlite(self):
-        synapse_dir = None
-        server_process = None
-        stdout_thread = None
-        stderr_thread = None
-        try:
-            (
-                synapse_dir,
-                config_path,
-                server_process,
-                stdout_thread,
-                stderr_thread,
-            ) = await self.start_test_synapse()
-            # Register users (all as non-server-admins)
-            users = [
-                {"user": "roomadmin", "password": "pw1"},
-                {"user": "user2", "password": "pw2"},
-                {"user": "user3", "password": "pw3"},
-            ]
-            for u in users:
-                await self.register_user(
-                    config_path=config_path,
-                    dir=synapse_dir,
-                    user=u["user"],
-                    password=u["password"],
-                    admin=False,
-                )
-            # Login users
-            tokens = {}
-            for u in users:
-                tokens[u["user"]] = await self.login_user(u["user"], u["password"])
-            # "roomadmin" creates private room
-            admin_token = tokens["roomadmin"]
-            room_id = await self.create_private_room(admin_token)
-            # "roomadmin" invites others
-            for u in ["user2", "user3"]:
-                invited = await self.invite_user_to_room(
-                    room_id, f"@{u}:my.domain.name", admin_token
-                )
-                self.assertTrue(invited)
-            # Others accept invite
-            for u in ["user2", "user3"]:
-                accepted = await self.accept_room_invitation(
-                    room_id, f"@{u}:my.domain.name", tokens[u]
-                )
-                self.assertTrue(accepted)
-
-            # Verify all users are in the room
-            for u in ["roomadmin", "user2", "user3"]:
-                member_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state/m.room.member/@{u}:my.domain.name"
-                resp = requests.get(
-                    member_url,
-                    headers={"Authorization": f"Bearer {tokens[u]}"},
-                )
-                self.assertEqual(resp.status_code, 200)
-                self.assertEqual(resp.json().get("membership"), "join")
-
-            # Non-room-admin tries to delete (should fail)
-            delete_url = "http://localhost:8008/_synapse/client/pangea/v1/delete_room"
-            response = requests.post(
-                delete_url,
-                json={"room_id": room_id},
-                headers={"Authorization": f"Bearer {tokens['user2']}"},
-            )
-            self.assertEqual(response.status_code, 400)
-            self.assertIn("highest power level", response.json().get("error", ""))
-            # Room creator deletes (should succeed)
-            response = requests.post(
-                delete_url,
-                json={"room_id": room_id},
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["message"], "Deleted")
-
-            # Assert other users are no longer in the room
-            for u in ["user2", "user3"]:
-                resp = requests.get(
-                    "http://localhost:8008/_matrix/client/v3/joined_rooms",
-                    headers={"Authorization": f"Bearer {tokens[u]}"},
-                )
-                self.assertEqual(resp.status_code, 200)
-                joined_rooms = resp.json().get("joined_rooms", [])
-                self.assertEqual(len(joined_rooms), 0)
-        finally:
-            if server_process is not None:
-                server_process.terminate()
-                server_process.wait()
-            if stdout_thread is not None:
-                stdout_thread.join()
-            if stderr_thread is not None:
-                stderr_thread.join()
-            if synapse_dir is not None:
-                shutil.rmtree(synapse_dir)
+        await self._test_delete_room(db="sqlite")
 
     async def test_delete_room_postgres(self):
+        await self._test_delete_room(db="postgresql")
+
+    async def _test_delete_room(self, db: Literal["sqlite", "postgresql"]):
         postgres = None
+        postgres_url = None
         synapse_dir = None
         server_process = None
         stdout_thread = None
         stderr_thread = None
         try:
-            postgres, postgres_url = await self.start_test_postgres()
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
             (
                 synapse_dir,
                 config_path,
                 server_process,
                 stdout_thread,
                 stderr_thread,
-            ) = await self.start_test_synapse(
-                db="postgresql", postgresql_url=postgres_url
-            )
+            ) = await self.start_test_synapse(db=db, postgresql_url=postgres_url)
+
             # Register users (all as non-server-admins)
             users = [
                 {"user": "roomadmin", "password": "pw1"},
                 {"user": "user2", "password": "pw2"},
                 {"user": "user3", "password": "pw3"},
+                {"user": "anotheradmin", "password": "pw4"},
             ]
             for u in users:
                 await self.register_user(
@@ -406,6 +319,61 @@ class TestE2E(aiounittest.AsyncTestCase):
                 self.assertEqual(resp.status_code, 200)
                 joined_rooms = resp.json().get("joined_rooms", [])
                 self.assertEqual(len(joined_rooms), 0)
+
+            # "roomadmin" creates another private room and invite anotheradmin
+            room_id = await self.create_private_room(admin_token)
+            for u in ["anotheradmin"]:
+                invited = await self.invite_user_to_room(
+                    room_id, f"@{u}:my.domain.name", admin_token
+                )
+                self.assertTrue(invited)
+
+            # "anotheradmin" accept invite
+            for u in ["anotheradmin"]:
+                accepted = await self.accept_room_invitation(
+                    room_id, f"@{u}:my.domain.name", tokens[u]
+                )
+                self.assertTrue(accepted)
+
+            # Update anotheradmin to be room admin
+            for u in ["anotheradmin"]:
+                await self.set_member_power_level(
+                    room_id, f"@{u}:my.domain.name", 100, admin_token
+                )
+
+            # Verify all users are in the room and is admin
+            for u in ["roomadmin", "anotheradmin"]:
+                member_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state/m.room.member/@{u}:my.domain.name"
+                resp = requests.get(
+                    member_url,
+                    headers={"Authorization": f"Bearer {tokens[u]}"},
+                )
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.json().get("membership"), "join")
+
+                power_level = await self.get_member_power_level(
+                    room_id, f"@{u}:my.domain.name", admin_token
+                )
+                self.assertEqual(power_level, 100)
+
+            # roomadmin deletes (should succeed)
+            response = requests.post(
+                delete_url,
+                json={"room_id": room_id},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["message"], "Deleted")
+            # Assert other users are no longer in the room
+            for u in ["anotheradmin"]:
+                resp = requests.get(
+                    "http://localhost:8008/_matrix/client/v3/joined_rooms",
+                    headers={"Authorization": f"Bearer {tokens[u]}"},
+                )
+                self.assertEqual(resp.status_code, 200)
+                joined_rooms = resp.json().get("joined_rooms", [])
+                self.assertEqual(len(joined_rooms), 0)
+
         finally:
             if postgres is not None:
                 postgres.stop()
@@ -440,3 +408,60 @@ class TestE2E(aiounittest.AsyncTestCase):
             headers={"Authorization": f"Bearer {access_token}"},
         )
         return response.status_code == 200
+
+    async def set_member_power_level(
+        self, room_id: str, user_id: str, power_level: int, access_token: str
+    ):
+        base_url = "http://localhost:8008/_matrix/client/v3"
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        # 1. Fetch current power levels
+        power_levels_url = f"{base_url}/rooms/{room_id}/state/m.room.power_levels"
+        get_response = requests.get(power_levels_url, headers=headers)
+        if get_response.status_code != 200:
+            print(
+                f"Error fetching power levels: {get_response.status_code} {get_response.text}"
+            )
+            return False
+
+        power_levels = get_response.json()
+
+        # 2. Update the user's power level
+        if "users" not in power_levels:
+            power_levels["users"] = {}
+        power_levels["users"][user_id] = power_level
+
+        # 3. Send the updated state
+        put_response = requests.put(
+            power_levels_url, headers=headers, json=power_levels
+        )
+        if put_response.status_code not in (200, 201):
+            print(
+                f"Error updating power levels: {put_response.status_code} {put_response.text}"
+            )
+            return False
+
+        return True
+
+    async def get_member_power_level(
+        self, room_id: str, user_id: str, access_token: str
+    ):
+        base_url = "http://localhost:8008/_matrix/client/v3"
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        # 1. Fetch current power levels
+        power_levels_url = f"{base_url}/rooms/{room_id}/state/m.room.power_levels"
+        get_response = requests.get(power_levels_url, headers=headers)
+        if get_response.status_code != 200:
+            print(
+                f"Error fetching power levels: {get_response.status_code} {get_response.text}"
+            )
+            return False
+
+        power_levels = get_response.json()
+
+        user_permissions = power_levels.get("users", {})
+
+        users_default = power_levels.get("user_defaults", 0)
+
+        return user_permissions.get(user_id, users_default)
