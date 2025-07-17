@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from synapse_delete_room_rest_api.constants import MEMBERSHIP_LEAVE
 from synapse_delete_room_rest_api.extract_body_json import extract_body_json
 from synapse_delete_room_rest_api.get_room_members import get_room_members
 from synapse_delete_room_rest_api.is_rate_limited import is_rate_limited
@@ -102,8 +103,25 @@ class DeleteRoom(Resource):
 
                 return
 
-            # Purge room
-            await self._pagination_handler.purge_room(room_id, force=True)
+            should_purge = False
+            for user in room_members_ids:
+                try:
+                    if self._api.is_mine(user):
+                        await self._api.update_room_membership(
+                            user, user, room_id, MEMBERSHIP_LEAVE
+                        )
+                    else:
+                        await self._datastores.main.remove_room_membership(
+                            user, room_id, MEMBERSHIP_LEAVE
+                        )
+                except Exception as e:
+                    should_purge = True
+                    logger.error(
+                        f"Failed to remove membership for {user} in {room_id}: {e}"
+                    )
+
+            if should_purge:
+                await self._pagination_handler.purge_room(room_id, force=True)
 
             respond_with_json(
                 request,
