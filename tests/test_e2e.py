@@ -467,3 +467,232 @@ class TestE2E(aiounittest.AsyncTestCase):
         users_default = power_levels.get("user_defaults", 0)
 
         return user_permissions.get(user_id, users_default)
+
+    async def create_space(self, access_token: str, name: str = "Test Space") -> str:
+        """Create a new space and return its room_id."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        create_space_url = "http://localhost:8008/_matrix/client/v3/createRoom"
+        create_space_data = {
+            "visibility": "private",
+            "preset": "private_chat",
+            "creation_content": {"type": "m.space"},
+            "name": name,
+        }
+        response = requests.post(
+            create_space_url,
+            json=create_space_data,
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()["room_id"]
+
+    async def add_child_to_space(
+        self, space_id: str, child_room_id: str, access_token: str
+    ) -> bool:
+        """Add a child room to a space."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        space_child_url = f"http://localhost:8008/_matrix/client/v3/rooms/{space_id}/state/m.space.child/{child_room_id}"
+        space_child_data = {
+            "via": ["my.domain.name"],
+            "order": "01",
+        }
+        response = requests.put(
+            space_child_url,
+            json=space_child_data,
+            headers=headers,
+        )
+        return response.status_code in (200, 201)
+
+    async def add_parent_to_room(
+        self, room_id: str, parent_space_id: str, access_token: str
+    ) -> bool:
+        """Add a parent space to a room."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        space_parent_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state/m.space.parent/{parent_space_id}"
+        space_parent_data = {
+            "via": ["my.domain.name"],
+            "canonical": True,
+        }
+        response = requests.put(
+            space_parent_url,
+            json=space_parent_data,
+            headers=headers,
+        )
+        return response.status_code in (200, 201)
+
+    async def get_space_children(self, space_id: str, access_token: str) -> list:
+        """Get the children of a space by looking at m.space.child state events with non-empty content."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        # Get all state events from the space
+        state_url = f"http://localhost:8008/_matrix/client/v3/rooms/{space_id}/state"
+        response = requests.get(state_url, headers=headers)
+        if response.status_code != 200:
+            return []
+
+        state_events = response.json()
+        space_child_events = []
+        for event in state_events:
+            if event.get("type") == "m.space.child" and event.get("content"):
+                # Only include events with non-empty content (active relationships)
+                space_child_events.append(event)
+        return space_child_events
+
+    async def get_room_space_parents(self, room_id: str, access_token: str) -> dict:
+        """Get the space parent events for a room."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        # Get all m.space.parent events from the room state
+        state_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state"
+        response = requests.get(state_url, headers=headers)
+        if response.status_code != 200:
+            return {}
+
+        state_events = response.json()
+        space_parent_events = {}
+        for event in state_events:
+            if event.get("type") == "m.space.parent":
+                space_parent_events[event["state_key"]] = event
+        return space_parent_events
+
+    async def test_delete_room_with_space_relationships_sqlite(self):
+        await self._test_delete_room_with_space_relationships(db="sqlite")
+
+    async def test_delete_room_with_space_relationships_postgres(self):
+        await self._test_delete_room_with_space_relationships(db="postgresql")
+
+    async def _test_delete_room_with_space_relationships(
+        self, db: Literal["sqlite", "postgresql"]
+    ):
+        """Test that space relationships are properly cleaned up when a room is deleted."""
+        postgres = None
+        postgres_url = None
+        synapse_dir = None
+        server_process = None
+        stdout_thread = None
+        stderr_thread = None
+        try:
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
+            (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            ) = await self.start_test_synapse(db=db, postgresql_url=postgres_url)
+
+            # Register users
+            users = [
+                {"user": "spaceadmin", "password": "pw1"},
+                {"user": "roomcreator", "password": "pw2"},
+            ]
+            for register_user in users:
+                await self.register_user(
+                    config_path=config_path,
+                    dir=synapse_dir,
+                    user=register_user["user"],
+                    password=register_user["password"],
+                    admin=False,
+                )
+
+            # Login users
+            tokens = {}
+            for token_user in users:
+                tokens[token_user["user"]] = await self.login_user(
+                    token_user["user"], token_user["password"]
+                )
+
+            space_admin_token = tokens["spaceadmin"]
+            room_creator_token = tokens["roomcreator"]
+
+            # Create a space
+            space_id = await self.create_space(space_admin_token, "Test Space")
+
+            # Create a regular room
+            room_id = await self.create_private_room(room_creator_token)
+
+            # Invite room creator to space and vice versa to allow space relationship setup
+            await self.invite_user_to_room(
+                space_id, "@roomcreator:my.domain.name", space_admin_token
+            )
+            await self.accept_room_invitation(
+                space_id, "@roomcreator:my.domain.name", room_creator_token
+            )
+
+            # Give room creator admin powers in the space so they can modify space relationships
+            await self.set_member_power_level(
+                space_id, "@roomcreator:my.domain.name", 100, space_admin_token
+            )
+
+            await self.invite_user_to_room(
+                room_id, "@spaceadmin:my.domain.name", room_creator_token
+            )
+            await self.accept_room_invitation(
+                room_id, "@spaceadmin:my.domain.name", space_admin_token
+            )
+
+            # Set up space relationships
+            # Add the room as a child of the space
+            child_added = await self.add_child_to_space(
+                space_id, room_id, space_admin_token
+            )
+            self.assertTrue(child_added, "Failed to add child to space")
+
+            # Add the space as a parent of the room
+            parent_added = await self.add_parent_to_room(
+                room_id, space_id, room_creator_token
+            )
+            self.assertTrue(parent_added, "Failed to add parent to room")
+
+            # Verify relationships exist before deletion
+            space_children = await self.get_space_children(space_id, space_admin_token)
+            child_room_ids = [child["state_key"] for child in space_children]
+            self.assertIn(
+                room_id, child_room_ids, "Room should be a child of the space"
+            )
+
+            room_parents = await self.get_room_space_parents(
+                room_id, room_creator_token
+            )
+            self.assertIn(
+                space_id, room_parents, "Space should be a parent of the room"
+            )
+
+            # Delete the room using our API
+            delete_url = "http://localhost:8008/_synapse/client/pangea/v1/delete_room"
+            response = requests.post(
+                delete_url,
+                json={"room_id": room_id},
+                headers={"Authorization": f"Bearer {room_creator_token}"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["message"], "Deleted")
+
+            # Wait a moment for the cleanup to complete
+            await asyncio.sleep(1)
+
+            # Verify space relationships are cleaned up
+            space_children_after = await self.get_space_children(
+                space_id, space_admin_token
+            )
+            child_room_ids_after = [
+                child["state_key"] for child in space_children_after
+            ]
+
+            self.assertNotIn(
+                room_id,
+                child_room_ids_after,
+                "Room should no longer be a child of the space after deletion",
+            )
+
+        finally:
+            if postgres is not None:
+                postgres.stop()
+            if server_process is not None:
+                server_process.terminate()
+                server_process.wait()
+            if stdout_thread is not None:
+                stdout_thread.join()
+            if stderr_thread is not None:
+                stderr_thread.join()
+            if synapse_dir is not None:
+                shutil.rmtree(synapse_dir)
